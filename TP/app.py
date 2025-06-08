@@ -74,6 +74,16 @@ def init_database():
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
             )
         ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS user_interests (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                user_id INT NOT NULL,
+                interests JSON,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+        ''')
         
         connection.commit()
         cursor.close()
@@ -174,7 +184,66 @@ def save_travel_history(user_id, destination, country, start_date, end_date, bud
             connection.close()
     return False
 
+def save_user_interests(user_id, interests):
+    """Save or update user interests"""
+    connection = get_db_connection()
+    if connection:
+        cursor = connection.cursor()
+        try:
+            # Check if user already has interests saved
+            cursor.execute('SELECT id FROM user_interests WHERE user_id = %s', (user_id,))
+            existing = cursor.fetchone()
+            
+            if existing:
+                # Update existing interests
+                cursor.execute('''
+                    UPDATE user_interests 
+                    SET interests = %s 
+                    WHERE user_id = %s
+                ''', (json.dumps(interests), user_id))
+            else:
+                # Insert new interests
+                cursor.execute('''
+                    INSERT INTO user_interests (user_id, interests)
+                    VALUES (%s, %s)
+                ''', (user_id, json.dumps(interests)))
+            
+            connection.commit()
+            return True
+        except Error as e:
+            print(f"Error saving user interests: {e}")
+            return False
+        finally:
+            cursor.close()
+            connection.close()
+    return False
 
+def get_user_interests(user_id):
+    """Get user's saved interests"""
+    connection = get_db_connection()
+    if connection:
+        cursor = connection.cursor(dictionary=True)
+        try:
+            cursor.execute('''
+                SELECT interests 
+                FROM user_interests 
+                WHERE user_id = %s
+            ''', (user_id,))
+            result = cursor.fetchone()
+            
+            if result and result['interests']:
+                try:
+                    return json.loads(result['interests'])
+                except json.JSONDecodeError:
+                    return []
+            return []
+        except Error as e:
+            print(f"Error fetching user interests: {e}")
+            return []
+        finally:
+            cursor.close()
+            connection.close()
+    return []
 def get_user_travel_history(user_id):
     """Get user's travel history"""
     connection = get_db_connection()
@@ -217,10 +286,39 @@ def get_user_travel_history(user_id):
             connection.close()
     return []
 
-# Routes
+@app.route('/save_interests', methods=['POST'])
+@login_required
+def save_interests():
+    if 'user_id' not in session:
+        return jsonify({'success': False, 'error': 'Not logged in'}), 401
+    
+    interests = request.form.getlist('interests')
+    if not interests:
+        return jsonify({'success': False, 'error': 'No interests provided'}), 400
+    
+    if save_user_interests(session['user_id'], interests):
+        return jsonify({'success': True})
+    else:
+        return jsonify({'success': False, 'error': 'Failed to save interests'}), 500
+
+@app.route('/get_interests', methods=['GET'])
+@login_required
+def get_interests():
+    if 'user_id' not in session:
+        return jsonify({'success': False, 'error': 'Not logged in'}), 401
+    
+    interests = get_user_interests(session['user_id'])
+    return jsonify({'success': True, 'interests': interests})
+
+# Update home route to include saved interests
 @app.route('/')
 def home():
-    return render_template('index.html', common_interests=common_interests)
+    saved_interests = []
+    if 'user_id' in session:
+        saved_interests = get_user_interests(session['user_id'])
+    return render_template('index.html', 
+                         common_interests=common_interests,
+                         saved_interests=saved_interests)
 
 @app.route('/signup', methods=['GET', 'POST'])
 def signup():
@@ -292,9 +390,10 @@ def logout():
 @login_required
 def profile():
     user = get_user_by_id(session['user_id'])
+    interests = get_user_interests(session['user_id'])
     history = get_user_travel_history(session['user_id'])
     print("Retrieved history:", history)  # Debug output
-    return render_template('profile.html', user=user, history=history)
+    return render_template('profile.html', user=user, history=history,interests=interests)
 
 @app.route('/destination', methods=['POST'])
 def destination():
@@ -366,8 +465,6 @@ def recommendations():
                             continent=continent)
         
  
-
-
 @app.route('/itinerary', methods=['POST'])
 @login_required
 def itinerary():
@@ -380,7 +477,8 @@ def itinerary():
         interests = request.form.getlist('interests')
         budget = float(request.form.get('budget', 0))
         num_people = int(request.form.get('num_people', 1))
-
+        if interests:
+            save_user_interests(session['user_id'], interests)
         # Validate inputs first
         validate_trip_input(destination, start_date_str, end_date_str, budget, num_people)
 
@@ -456,6 +554,9 @@ def itinerary():
         flash("An unexpected error occurred while generating your itinerary", "error")
         return redirect(url_for('home'))
     
+
+
+# API endpoints for AJAX calls
 # API endpoints for AJAX calls (example)
 @app.route('/api/destination_info', methods=['POST'])
 def api_destination_info():
